@@ -7,7 +7,7 @@ st.title("AI Chat Assistant")
 
 # Initialize OpenAI client using DeepSeek API (same configuration as in main.py)
 client = OpenAI(
-    api_key="sk-1c38a31564814d34a437b702099263ad",
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com"
 )
 
