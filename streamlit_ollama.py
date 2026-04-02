@@ -1,16 +1,28 @@
+import os
+
 import streamlit as st
 from openai import OpenAI
 from datetime import datetime
 import json
 from pathlib import Path
+import logging
 
 from mysql_tools import MySQLTools
 from file_tools import FileTools
 
 # =============================================================================
+# Logging Configuration
+# =============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# =============================================================================
 # Constants Configuration
 # =============================================================================
-MODEL_NAME = "deepseek-r1:1.5b"
+MODEL_NAME = "deepseek-chat"
 
 DB_CONFIG = {
     'host': 'localhost',
@@ -123,10 +135,12 @@ def save_json_to_file(file_tools: FileTools, filename: str, data: dict) -> tuple
 
         if file_tools.create_file(filename, content):
             filepath = str(file_tools.get_base_path() / filename)
+            logger.info(f"Saved session to file: {filepath}")
             return True, filepath
         return False, "Failed to create file"
 
     except Exception as e:
+        logger.error(f"Error saving to file: {e}")
         return False, f"Error saving to file: {e}"
 
 
@@ -143,9 +157,12 @@ def update_json_file(file_tools: FileTools, filename: str, data: dict) -> bool:
     """
     try:
         content = json.dumps(data, ensure_ascii=False, indent=2, default=str)
-        return file_tools.update_file(filename, content)
+        result = file_tools.update_file(filename, content)
+        if result:
+            logger.info(f"Updated conversation file: {filename}")
+        return result
     except Exception as e:
-        print(f"Error updating file: {e}")
+        logger.error(f"Error updating file: {e}")
         st.error(f"Error updating conversation file: {e}")
         return False
 
@@ -182,12 +199,12 @@ def load_messages_from_file(file_tools: FileTools, filename: str) -> tuple[list,
     """
     try:
         if not file_tools.get_base_path().exists():
-            print(f"Base path does not exist: {file_tools.get_base_path()}")
+            logger.error(f"Base path does not exist: {file_tools.get_base_path()}")
             return [], "", ""
 
         content = file_tools.read_file(filename)
         if not content:
-            print(f"Failed to read file content: {filename}")
+            logger.error(f"Failed to read file content: {filename}")
             return [], "", ""
 
         # Try JSON format first
@@ -197,12 +214,12 @@ def load_messages_from_file(file_tools: FileTools, filename: str) -> tuple[list,
                 messages = json_data['messages']
                 if isinstance(messages, list):
                     name, personality = extract_name_and_personality(messages)
-                    print(f"Successfully loaded {len(messages)} messages from {filename} (JSON format)")
-                    print(f"Extracted name: '{name}', personality: '{personality}'")
+                    logger.info(f"Successfully loaded {len(messages)} messages from {filename} (JSON format)")
+                    logger.info(f"Extracted name: '{name}', personality: '{personality}'")
                     return messages, name, personality
-                print(f"Messages field is not a list in {filename}")
+                logger.error(f"Messages field is not a list in {filename}")
                 return [], "", ""
-            print(f"Invalid JSON structure in {filename}")
+            logger.error(f"Invalid JSON structure in {filename}")
             return [], "", ""
         except json.JSONDecodeError:
             pass
@@ -211,9 +228,7 @@ def load_messages_from_file(file_tools: FileTools, filename: str) -> tuple[list,
         return parse_text_format_messages(content, filename)
 
     except Exception as e:
-        print(f"Error loading from file: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error loading from file: {e}", exc_info=True)
         st.error(f"Error loading conversation from file: {e}")
         return [], "", ""
 
@@ -270,8 +285,8 @@ def parse_text_format_messages(content: str, filename: str) -> tuple[list, str, 
     if current_role and current_content:
         messages.append({'role': current_role, 'content': '\n'.join(current_content)})
 
-    print(f"Successfully loaded {len(messages)} messages from {filename} (Text format)")
-    print(f"Extracted name: '{extracted_name}', personality: '{extracted_personality}'")
+    logger.info(f"Successfully loaded {len(messages)} messages from {filename} (Text format)")
+    logger.info(f"Extracted name: '{extracted_name}', personality: '{extracted_personality}'")
     return messages, extracted_name, extracted_personality
 
 
@@ -296,9 +311,12 @@ def get_chat_response(client: OpenAI, model: str, messages: list,
             temperature=temperature,
             max_tokens=max_tokens
         )
-        return True, response.choices[0].message.content
+        assistant_response = response.choices[0].message.content
+        logger.info(f"Got AI response from {model}: {assistant_response[:100]}...")
+        return True, assistant_response
     except Exception as e:
         error_msg = f"Error communicating with Ollama ({model}): {str(e)}"
+        logger.error(error_msg)
         return False, error_msg
 
 
@@ -324,12 +342,12 @@ def save_session_to_txt(file_tools: FileTools, session_name: str, messages: list
         success, result = save_json_to_file(file_tools, filename, session_data)
         if success:
             return result
-        print(f"Error saving to TXT: {result}")
+        logger.error(f"Error saving to TXT: {result}")
         st.error(f"Error saving conversation to file: {result}")
         return None
 
     except Exception as e:
-        print(f"Error saving to TXT: {e}")
+        logger.error(f"Error saving to TXT: {e}")
         st.error(f"Error saving conversation to file: {e}")
         return None
 
@@ -349,9 +367,12 @@ def update_txt_file(file_tools: FileTools, filepath: str, messages: list) -> boo
         filename = Path(filepath).name
         session_name = filename.replace('.txt', '')
         session_data = create_session_json_data(session_name, messages, include_created=False)
-        return update_json_file(file_tools, filename, session_data)
+        result = update_json_file(file_tools, filename, session_data)
+        if result:
+            logger.info(f"Updated session file: {filename}")
+        return result
     except Exception as e:
-        print(f"Error updating TXT file: {e}")
+        logger.error(f"Error updating TXT file: {e}")
         st.error(f"Error updating conversation file: {e}")
         return False
 
@@ -375,6 +396,7 @@ def save_session_to_mysql(sql: MySQLTools, file_tools: FileTools,
         if session_id:
             sessions = sql.select_all("chat_sessions", {"id": session_id})
             if not sessions:
+                logger.warning(f"Session not found for update: {session_id}")
                 return False
 
             file_path = sessions[0].get('file_path', '')
@@ -385,7 +407,9 @@ def save_session_to_mysql(sql: MySQLTools, file_tools: FileTools,
 
             result = sql.update("chat_sessions", session_data, {"id": session_id})
             if result and file_path:
-                return update_txt_file(file_tools, file_path, messages)
+                update_result = update_txt_file(file_tools, file_path, messages)
+                logger.info(f"Updated session {session_id} in database and file")
+                return update_result
             return result
         else:
             file_path = save_session_to_txt(file_tools, session_name, messages)
@@ -399,10 +423,12 @@ def save_session_to_mysql(sql: MySQLTools, file_tools: FileTools,
             }
 
             result = sql.insert("chat_sessions", session_data)
+            if result:
+                logger.info(f"Saved new session '{session_name}' to database with ID: {result}")
             return result is not None
 
     except Exception as e:
-        print(f"Error saving session: {e}")
+        logger.error(f"Error saving session: {e}")
         st.error(f"Error saving session: {e}")
         return False
 
@@ -417,8 +443,11 @@ def load_sessions_from_mysql(sql: MySQLTools) -> list:
         List of sessions
     """
     try:
-        return sql.select_all("chat_sessions", order_by="create_time DESC")
+        sessions = sql.select_all("chat_sessions", order_by="create_time DESC")
+        logger.info(f"Loaded {len(sessions)} sessions from database")
+        return sessions
     except Exception as e:
+        logger.error(f"Error loading sessions: {e}")
         st.error(f"Error loading sessions: {e}")
         return []
 
@@ -437,6 +466,7 @@ def delete_session_from_mysql(sql: MySQLTools, file_tools: FileTools, session_id
     try:
         sessions = sql.select_all("chat_sessions", {"id": session_id})
         if not sessions:
+            logger.warning(f"Session not found for deletion: {session_id}")
             return False
 
         file_path = sessions[0].get('file_path', '')
@@ -444,12 +474,16 @@ def delete_session_from_mysql(sql: MySQLTools, file_tools: FileTools, session_id
 
         if result and file_path:
             filename = Path(file_path).name
-            file_tools.delete_file(filename)
-            print(f"Deleted TXT file: {filename}")
+            if file_tools.delete_file(filename):
+                logger.info(f"Deleted TXT file: {filename}")
+            else:
+                logger.warning(f"Failed to delete TXT file: {filename}")
 
+        logger.info(f"Deleted session {session_id} from database")
         return result
 
     except Exception as e:
+        logger.error(f"Error deleting session: {e}")
         st.error(f"Error deleting session: {e}")
         return False
 
@@ -527,37 +561,6 @@ def render_session_buttons():
     st.divider()
     return None
 
-
-def render_current_sessions(chat_history: dict, current_session: str, current_session_id: int):
-    """Render current sessions list in sidebar
-
-    Args:
-        chat_history: Dictionary of chat histories
-        current_session: Current active session name
-        current_session_id: Current session ID
-
-    Returns:
-        Tuple of (action_type, session_name) if action triggered
-    """
-    st.subheader("📚 Current Sessions")
-
-    if not chat_history:
-        st.info("No active sessions yet")
-        return None, None
-
-    for session_name in list(chat_history.keys()):
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            if st.button(f"💬 {session_name}", use_container_width=True,
-                         key=f"load_{session_name}"):
-                return "load_current", session_name
-        with col2:
-            if st.button("🗑️", key=f"delete_{session_name}"):
-                return "delete_current", session_name
-
-    return None, None
-
-
 def render_saved_sessions(saved_sessions: list, current_session_id: int, force_refresh: int):
     """Render saved sessions list in sidebar
 
@@ -569,11 +572,9 @@ def render_saved_sessions(saved_sessions: list, current_session_id: int, force_r
     Returns:
         Tuple of (action_type, session_data) if action triggered
     """
-    st.subheader("💾 Saved Sessions (DB)")
+    st.subheader("💾 Saved Sessions")
 
-    if not saved_sessions:
-        st.info("No saved sessions in database")
-        return None, None
+    if not saved_sessions: return None, None
 
     for session in saved_sessions:
         session_name = session['session_name']
@@ -603,6 +604,7 @@ file_tools = FileTools(CONVERSATIONS_FOLDER)
 
 if not CONVERSATIONS_FOLDER.exists():
     CONVERSATIONS_FOLDER.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Created conversations folder: {CONVERSATIONS_FOLDER}")
 
 # Set page configuration
 st.set_page_config(
@@ -616,9 +618,11 @@ render_sidebar_css()
 
 # Initialize OpenAI client (Ollama-compatible API)
 client = OpenAI(
-    api_key="ollama",
-    base_url="http://localhost:11434/v1"
+    api_key= os.getenv("DEEPSEEK_API_KEY"),
+    base_url="https://api.deepseek.com"
 )
+
+logger.info(f"Initialized AI chat application with model: {MODEL_NAME}")
 
 # Initialize session state
 session_defaults = {
@@ -650,7 +654,7 @@ def load_saved_session_callback(session_id: int, file_path: str, session_name: s
         file_path: Path to conversation file
         session_name: Name of the session
     """
-    print(f"Loading session {session_id} from {file_path}")
+    logger.info(f"Loading session {session_id} from {file_path}")
 
     if file_path and Path(file_path).exists():
         messages, extracted_name, extracted_personality = load_messages_from_file(
@@ -664,20 +668,24 @@ def load_saved_session_callback(session_id: int, file_path: str, session_name: s
 
             if extracted_name:
                 st.session_state.chat_partner_name = extracted_name
-                print(f"Set chat_partner_name to: '{extracted_name}'")
+                logger.info(f"Set chat_partner_name to: '{extracted_name}'")
 
             if extracted_personality:
                 st.session_state.chat_partner_personality = extracted_personality
-                print(f"Set chat_partner_personality to: '{extracted_personality}'")
+                logger.info(f"Set chat_partner_personality to: '{extracted_personality}'")
 
             st.session_state.should_rerun = True
+            logger.info(f"Successfully loaded session: {session_name}")
         else:
+            logger.error(f"Failed to load conversation from: {file_path}")
             st.error(f"Failed to load conversation from: {file_path}")
             st.info("File may be empty or corrupted")
     elif file_path:
+        logger.error(f"File not found: {file_path}")
         st.error(f"File not found: {file_path}")
         st.info("The conversation file has been deleted or moved")
     else:
+        logger.error(f"No file path found for session: {session_id}")
         st.error("No file path found for this session")
 
 
@@ -697,6 +705,7 @@ with st.sidebar:
     )
 
     if should_update:
+        logger.info(f"Updating chat partner: {new_name} - {new_personality}")
         st.session_state.chat_partner_name = new_name
         st.session_state.chat_partner_personality = new_personality
 
@@ -734,28 +743,7 @@ with st.sidebar:
             )
         }]
         st.session_state.current_session_id = None
-        st.rerun()
-
-    st.divider()
-
-    # Current Sessions
-    action, session_data = render_current_sessions(
-        st.session_state.chat_history,
-        st.session_state.current_session,
-        st.session_state.current_session_id
-    )
-
-    if action == "load_current":
-        st.session_state.current_session = session_data
-        st.session_state.messages = st.session_state.chat_history[session_data].copy()
-        st.session_state.current_session_id = None
-        st.rerun()
-    elif action == "delete_current":
-        del st.session_state.chat_history[session_data]
-        if st.session_state.current_session == session_data:
-            st.session_state.current_session = "New Session"
-            st.session_state.messages = []
-            st.session_state.current_session_id = None
+        logger.info(f"Created new session: {new_session_name}")
         st.rerun()
 
     st.divider()
@@ -774,6 +762,7 @@ with st.sidebar:
             session_data['session_name']
         )
     elif action == "delete_saved":
+        logger.info(f"Deleting saved session: {session_data}")
         if delete_session_from_mysql(sql, file_tools, session_data):
             st.session_state.saved_sessions = load_sessions_from_mysql(sql)
             if st.session_state.current_session_id == session_data:
@@ -809,6 +798,7 @@ if prompt := st.chat_input("What would you like to discuss?"):
 
     # Add to history
     st.session_state.messages.append({"role": "user", "content": prompt})
+    logger.debug(f"User message added: {prompt[:50]}...")
 
     if st.session_state.current_session:
         if st.session_state.current_session not in st.session_state.chat_history:
@@ -833,6 +823,7 @@ if prompt := st.chat_input("What would you like to discuss?"):
 # Clear chat option
 if st.session_state.messages and len(st.session_state.messages) > 1:
     if st.button("🗑️ Clear Current Chat"):
+        logger.info("Clearing current chat")
         st.session_state.messages = []
         if st.session_state.current_session:
             st.session_state.chat_history[st.session_state.current_session] = []
